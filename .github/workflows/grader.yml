@@ -1,0 +1,305 @@
+name: Grader
+
+on:
+  push:
+    branches-ignore:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  grade:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── Métrica: migrations_present ────────────────────────────────────────
+      - name: Check required migration files exist
+        id: migrations_present
+        run: |
+          FOUND=0
+          TOTAL=4
+
+          [ -f "migrations/001_normalize_3nf.sql" ]   && FOUND=$((FOUND+1)) && echo "✅ 001_normalize_3nf.sql" || echo "❌ 001_normalize_3nf.sql not found"
+          [ -f "migrations/002_add_constraints.sql" ]  && FOUND=$((FOUND+1)) && echo "✅ 002_add_constraints.sql" || echo "❌ 002_add_constraints.sql not found"
+          [ -f "migrations/003_encrypt_pii.sql" ]     && FOUND=$((FOUND+1)) && echo "✅ 003_encrypt_pii.sql" || echo "❌ 003_encrypt_pii.sql not found"
+          [ -f "migrations/004_roles.sql" ]            && FOUND=$((FOUND+1)) && echo "✅ 004_roles.sql" || echo "❌ 004_roles.sql not found"
+
+          SCORE=$(node -e "console.log(($FOUND/$TOTAL).toFixed(3))")
+          echo "score=$SCORE" >> "$GITHUB_OUTPUT"
+          if [ "$FOUND" -eq "$TOTAL" ]; then
+            echo "passed=true" >> "$GITHUB_OUTPUT"
+            echo "✅ All 4 migration files present"
+          else
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+            echo "❌ $FOUND/$TOTAL migration files present"
+          fi
+
+      # ── Métrica: referential_integrity ────────────────────────────────────
+      - name: Check referential integrity (FK with ON DELETE/ON UPDATE)
+        id: referential_integrity
+        run: |
+          if ! ls migrations/00[1-4]*.sql >/dev/null 2>&1; then
+            echo "score=0.0" >> "$GITHUB_OUTPUT"
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+            echo "❌ No migration files to check"
+            exit 0
+          fi
+
+          # Count FK declarations
+          FK_TOTAL=$(grep -hcEi "REFERENCES\s+\w+\s*\(" migrations/00[1-4]*.sql 2>/dev/null | awk '{s+=$1} END {print s+0}')
+
+          # Count FKs with explicit ON DELETE
+          FK_WITH_DELETE=$(grep -hEi "REFERENCES[^;]*(ON DELETE)" migrations/00[1-4]*.sql 2>/dev/null | wc -l | tr -d ' ')
+          # Count FKs with explicit ON UPDATE
+          FK_WITH_UPDATE=$(grep -hEi "REFERENCES[^;]*(ON UPDATE)" migrations/00[1-4]*.sql 2>/dev/null | wc -l | tr -d ' ')
+
+          # Also count ALTER TABLE ADD CONSTRAINT FOREIGN KEY with ON DELETE/ON UPDATE
+          ALTER_DELETE=$(grep -hEi "FOREIGN KEY[^;]*(ON DELETE)" migrations/00[1-4]*.sql 2>/dev/null | wc -l | tr -d ' ')
+          ALTER_UPDATE=$(grep -hEi "FOREIGN KEY[^;]*(ON UPDATE)" migrations/00[1-4]*.sql 2>/dev/null | wc -l | tr -d ' ')
+
+          TOTAL_WITH_POLICY=$((FK_WITH_DELETE + ALTER_DELETE))
+
+          echo "FKs found: $FK_TOTAL"
+          echo "FKs with ON DELETE: $TOTAL_WITH_POLICY"
+
+          if [ "$FK_TOTAL" -eq 0 ]; then
+            echo "score=0.0" >> "$GITHUB_OUTPUT"
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+            echo "❌ No REFERENCES found in migrations — add FK constraints"
+            exit 0
+          fi
+
+          SCORE=$(node -e "console.log(Math.min($TOTAL_WITH_POLICY/$FK_TOTAL, 1).toFixed(3))")
+          echo "score=$SCORE" >> "$GITHUB_OUTPUT"
+
+          PCT=$(node -e "console.log(Math.round($TOTAL_WITH_POLICY/$FK_TOTAL * 100))")
+          if [ "$PCT" -ge 90 ]; then
+            echo "passed=true" >> "$GITHUB_OUTPUT"
+            echo "✅ Referential integrity: $PCT% of FKs have ON DELETE/ON UPDATE"
+          else
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+            echo "❌ Referential integrity: $PCT% (need ≥ 90%) — add ON DELETE/ON UPDATE to all FK constraints"
+          fi
+
+      # ── Métrica: pii_encrypted ─────────────────────────────────────────────
+      - name: Check PII columns are encrypted with pgcrypto
+        id: pii_encrypted
+        run: |
+          if [ ! -f "migrations/003_encrypt_pii.sql" ]; then
+            echo "score=0.0" >> "$GITHUB_OUTPUT"
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+            echo "❌ migrations/003_encrypt_pii.sql not found"
+            exit 0
+          fi
+
+          FOUND=0
+          TOTAL=5
+
+          grep -qi "pgp_sym_encrypt" migrations/003_encrypt_pii.sql && FOUND=$((FOUND+1)) || echo "❌ pgp_sym_encrypt not found"
+          grep -qi "full_name"       migrations/003_encrypt_pii.sql && FOUND=$((FOUND+1)) || echo "❌ full_name not encrypted"
+          grep -qi "phone"           migrations/003_encrypt_pii.sql && FOUND=$((FOUND+1)) || echo "❌ phone not encrypted"
+          grep -qi "card_number"     migrations/003_encrypt_pii.sql && FOUND=$((FOUND+1)) || echo "❌ card_number not encrypted"
+          grep -qi "cvv"             migrations/003_encrypt_pii.sql && FOUND=$((FOUND+1)) || echo "❌ cvv not encrypted"
+
+          SCORE=$(node -e "console.log(($FOUND/$TOTAL).toFixed(3))")
+          echo "score=$SCORE" >> "$GITHUB_OUTPUT"
+
+          if [ "$FOUND" -ge 4 ]; then
+            echo "passed=true" >> "$GITHUB_OUTPUT"
+            echo "✅ PII encryption: $FOUND/$TOTAL columns encrypted with pgp_sym_encrypt"
+          else
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+            echo "❌ PII encryption incomplete: $FOUND/$TOTAL columns (need full_name, phone, card_number, cvv)"
+          fi
+
+      # ── Métrica: db_roles_present ──────────────────────────────────────────
+      - name: Check BD roles with minimum privilege
+        id: db_roles
+        run: |
+          if [ ! -f "migrations/004_roles.sql" ]; then
+            echo "score=0.0" >> "$GITHUB_OUTPUT"
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+            echo "❌ migrations/004_roles.sql not found"
+            exit 0
+          fi
+
+          FOUND=0
+          TOTAL=6
+
+          grep -qi "app_reader"     migrations/004_roles.sql && FOUND=$((FOUND+1)) || echo "❌ app_reader role not found"
+          grep -qi "app_writer"     migrations/004_roles.sql && FOUND=$((FOUND+1)) || echo "❌ app_writer role not found"
+          grep -qi "app_admin"      migrations/004_roles.sql && FOUND=$((FOUND+1)) || echo "❌ app_admin role not found"
+          grep -qiE "CREATE ROLE"   migrations/004_roles.sql && FOUND=$((FOUND+1)) || echo "❌ CREATE ROLE not found"
+          grep -qiE "GRANT\s+SELECT" migrations/004_roles.sql && FOUND=$((FOUND+1)) || echo "❌ GRANT SELECT not found"
+          grep -qiE "GRANT\s+(SELECT|ALL)" migrations/004_roles.sql && FOUND=$((FOUND+1)) || echo "❌ GRANT statements not found"
+
+          SCORE=$(node -e "console.log(($FOUND/$TOTAL).toFixed(3))")
+          echo "score=$SCORE" >> "$GITHUB_OUTPUT"
+
+          if [ "$FOUND" -ge 5 ]; then
+            echo "passed=true" >> "$GITHUB_OUTPUT"
+            echo "✅ BD roles: $FOUND/$TOTAL checks (app_reader, app_writer, app_admin with GRANT)"
+          else
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+            echo "❌ BD roles incomplete: $FOUND/$TOTAL — create all 3 roles with appropriate GRANTs"
+          fi
+
+      # ── Métrica: parameterized_queries ─────────────────────────────────────
+      - name: Check for SQL injection patterns in migrations
+        id: param_queries
+        run: |
+          FOUND=0
+
+          # Detect string concatenation in EXECUTE (dynamic SQL injection)
+          if grep -rqhEi "EXECUTE\s+'[^'\$]" migrations/00[1-4]*.sql 2>/dev/null; then
+            FOUND=$((FOUND+1))
+            echo "⚠️  Dynamic EXECUTE with string literal detected"
+          fi
+
+          # Detect || concatenation in queries (potential injection)
+          if grep -rqhE "'\s*\|\|" migrations/00[1-4]*.sql 2>/dev/null; then
+            FOUND=$((FOUND+1))
+            echo "⚠️  String concatenation (||) in SQL detected"
+          fi
+
+          if [ "$FOUND" -eq 0 ]; then
+            echo "score=1.0" >> "$GITHUB_OUTPUT"
+            echo "passed=true" >> "$GITHUB_OUTPUT"
+            echo "✅ No SQL injection patterns detected in migrations"
+          else
+            echo "score=0.0" >> "$GITHUB_OUTPUT"
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+            echo "❌ $FOUND potential SQL injection pattern(s) found"
+          fi
+
+      # ── Métrica: schema_valid (run migrations against PostgreSQL) ──────────
+      - name: Start PostgreSQL
+        id: pg_start
+        run: |
+          docker compose up -d db
+          echo "Waiting for PostgreSQL..."
+          for i in $(seq 1 20); do
+            if docker compose exec -T db pg_isready -U postgres -d workshop >/dev/null 2>&1; then
+              echo "✅ PostgreSQL ready after ${i}s"
+              break
+            fi
+            sleep 1
+          done
+          docker compose exec -T db pg_isready -U postgres -d workshop || (echo "❌ PostgreSQL failed to start" && exit 1)
+
+      - name: Enable pgcrypto extension
+        run: |
+          docker compose exec -T db psql -U postgres -d workshop -c "CREATE EXTENSION IF NOT EXISTS pgcrypto;" && echo "✅ pgcrypto enabled"
+
+      - name: Run migrations in order
+        id: schema_valid
+        run: |
+          ALL_PASSED=true
+
+          run_migration() {
+            local file="$1"
+            local name=$(basename "$file")
+            if [ ! -f "$file" ]; then
+              echo "⚠️  $name not found — skipping"
+              return 0
+            fi
+            if docker compose exec -T db psql -U postgres -d workshop \
+                -v ON_ERROR_STOP=1 \
+                -v encryption_key='grader-test-key' \
+                -c "SET app.encryption_key = 'grader-test-key';" \
+                -f "/migrations/$name" 2>&1; then
+              echo "✅ $name executed successfully"
+            else
+              echo "❌ $name failed"
+              ALL_PASSED=false
+            fi
+          }
+
+          # Copy migration files into container
+          docker cp migrations/000_baseline.sql $(docker compose ps -q db):/migrations/000_baseline.sql 2>/dev/null || true
+          for n in 001_normalize_3nf 002_add_constraints 003_encrypt_pii 004_roles; do
+            [ -f "migrations/${n}.sql" ] && docker cp "migrations/${n}.sql" "$(docker compose ps -q db):/migrations/${n}.sql" 2>/dev/null || true
+          done
+
+          docker compose exec -T db mkdir -p /migrations
+          docker compose exec -T db psql -U postgres -d workshop -c "SET app.encryption_key = 'grader-test-key';" -f /migrations/000_baseline.sql 2>&1 || true
+
+          for n in 001_normalize_3nf 002_add_constraints 003_encrypt_pii 004_roles; do
+            run_migration "migrations/${n}.sql"
+          done
+
+          if $ALL_PASSED; then
+            echo "score=1.0" >> "$GITHUB_OUTPUT"
+            echo "passed=true" >> "$GITHUB_OUTPUT"
+            echo "✅ All migrations executed without errors"
+          else
+            echo "score=0.0" >> "$GITHUB_OUTPUT"
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+            echo "❌ One or more migrations failed — check SQL syntax"
+          fi
+
+      - name: Stop PostgreSQL
+        if: always()
+        run: docker compose down
+
+      # ── Reporte final ──────────────────────────────────────────────────────
+      - name: Build grader report
+        run: |
+          cat > grader-report.json << EOF
+          {
+            "schemaVersion": "1.0",
+            "templateSlug": "sec-db-hardening",
+            "runId": "${{ github.run_id }}",
+            "sha": "${{ github.sha }}",
+            "metrics": [
+              {
+                "metricKey": "referential_integrity",
+                "score": ${{ steps.referential_integrity.outputs.score }},
+                "passed": ${{ steps.referential_integrity.outputs.passed }},
+                "unavailable": false
+              },
+              {
+                "metricKey": "pii_encrypted",
+                "score": ${{ steps.pii_encrypted.outputs.score }},
+                "passed": ${{ steps.pii_encrypted.outputs.passed }},
+                "unavailable": false
+              },
+              {
+                "metricKey": "db_roles_present",
+                "score": ${{ steps.db_roles.outputs.score }},
+                "passed": ${{ steps.db_roles.outputs.passed }},
+                "unavailable": false
+              },
+              {
+                "metricKey": "parameterized_queries",
+                "score": ${{ steps.param_queries.outputs.score }},
+                "passed": ${{ steps.param_queries.outputs.passed }},
+                "unavailable": false
+              },
+              {
+                "metricKey": "schema_valid",
+                "score": ${{ steps.schema_valid.outputs.score }},
+                "passed": ${{ steps.schema_valid.outputs.passed }},
+                "unavailable": false
+              },
+              {
+                "metricKey": "migrations_present",
+                "score": ${{ steps.migrations_present.outputs.score }},
+                "passed": ${{ steps.migrations_present.outputs.passed }},
+                "unavailable": false
+              }
+            ]
+          }
+          EOF
+          cat grader-report.json
+
+      - name: Upload grader report
+        uses: actions/upload-artifact@v4
+        with:
+          name: grader-report
+          path: grader-report.json

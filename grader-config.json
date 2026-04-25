@@ -1,0 +1,81 @@
+{
+  "schemaVersion": "1.0",
+  "templateSlug": "sec-db-hardening",
+  "evaluationBlocks": [
+    {
+      "blockId": "auto",
+      "evaluationType": "automated_pipeline",
+      "metrics": [
+        {
+          "metricKey": "referential_integrity",
+          "worker": "SASTWorker",
+          "weight": 25,
+          "threshold": 0.9,
+          "config": {
+            "targetFiles": ["migrations/*.sql"],
+            "requiredPatterns": ["ON DELETE", "ON UPDATE"],
+            "checkFKCoverage": true,
+            "minCoverage": 0.9
+          }
+        },
+        {
+          "metricKey": "pii_encrypted",
+          "worker": "SASTWorker",
+          "weight": 20,
+          "threshold": 1.0,
+          "config": {
+            "targetFiles": ["migrations/*.sql"],
+            "requiredPatterns": ["pgp_sym_encrypt"],
+            "piiColumns": ["full_name", "phone", "card_number", "cvv", "card_expiry"]
+          }
+        },
+        {
+          "metricKey": "db_roles_present",
+          "worker": "SASTWorker",
+          "weight": 20,
+          "threshold": 1.0,
+          "config": {
+            "targetFiles": ["migrations/*.sql"],
+            "requiredRoles": ["app_reader", "app_writer", "app_admin"],
+            "requiredKeywords": ["CREATE ROLE", "GRANT"]
+          }
+        },
+        {
+          "metricKey": "parameterized_queries",
+          "worker": "SASTWorker",
+          "weight": 15,
+          "threshold": 1.0,
+          "config": {
+            "targetFiles": ["migrations/*.sql"],
+            "forbiddenPatterns": ["'\\s*\\|\\|", "EXECUTE\\s+'[^$]"],
+            "maxViolations": 0
+          }
+        },
+        {
+          "metricKey": "schema_valid",
+          "worker": "ConfigWorker",
+          "weight": 10,
+          "threshold": 1.0,
+          "config": {
+            "validator": "psql",
+            "targetFiles": ["migrations/001_normalize_3nf.sql", "migrations/002_add_constraints.sql", "migrations/003_encrypt_pii.sql", "migrations/004_roles.sql"]
+          }
+        },
+        {
+          "metricKey": "migrations_present",
+          "worker": "ConfigWorker",
+          "weight": 10,
+          "threshold": 1.0,
+          "config": {
+            "patterns": [
+              "migrations/001_normalize_3nf.sql",
+              "migrations/002_add_constraints.sql",
+              "migrations/003_encrypt_pii.sql",
+              "migrations/004_roles.sql"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}
