@@ -1,0 +1,53 @@
+# yura.workshop.yaml — declarative grader config
+# Spec: docs/grader-workers-spec.md §6
+# Generated from prisma/seeds/workshop-templates.seed.ts
+
+schema_version: "1.0"
+workshop:
+  id: sec-db-hardening
+  title: "Hardening y Normalización de BD"
+  type: code_quality
+  language: polyglot
+  passing_threshold: 70
+  base_branch: main
+submission:
+  source: workshop_link
+  required_inputs:
+    - type: github_repo_url
+      label: "URL del repositorio"
+      required: true
+evaluation_profile:
+  - metric_id: db_referential_integrity_score
+    weight: 30
+    threshold: 0.9
+    config:
+      min_score: 0.9
+  - metric_id: db_pii_encryption_detected
+    weight: 25
+    threshold: 1
+    config:
+      extensions:
+        - pgcrypto
+      encrypted_columns_min: 1
+  - metric_id: db_least_privilege_roles
+    weight: 20
+    threshold: 1
+    config:
+      required_roles:
+        - app_reader
+        - app_writer
+        - app_admin
+  - metric_id: parameterized_queries_ratio
+    weight: 15
+    threshold: 1
+    config:
+      tool: static_analysis
+      min_ratio: 1
+  - metric_id: config_file_valid_schema
+    weight: 10
+    threshold: 1
+    config:
+      target_file: .github/workflows/ci.yml
+      schema_source: bundled
+      schema_id: github-actions-workflow-1.0
+      format: yaml
